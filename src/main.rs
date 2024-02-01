@@ -46,8 +46,8 @@ impl State {
             velocity: vec![Vec2::zero(); WIDTH * HEIGHT],
             increment: vec![0.0; WIDTH * HEIGHT],
             delta: 0.1,
-            pipe_area: 0.1,
-            pipe_length: 0.1,
+            pipe_area: 1.0,
+            pipe_length: 1.0,
         }
     }
     fn ix(&self, x: usize, y: usize) -> usize {
@@ -108,41 +108,61 @@ impl State {
             // 3.2.1 Output Flux Computation
             let g = 9.81;
             // ...left
-            let delta_h_l = self.sediment[index] + self.water[index]
-                - self.get_sediment(self.ix(x - 1, y))
-                - self.get_water(self.ix(x - 1, y));
-            let flux_l_prev = self.flux_left[index];
-            let flux_l = f32::max(
-                0.0,
-                flux_l_prev + self.delta * self.pipe_area * ((g * delta_h_l) / self.pipe_length),
-            );
+            let flux_l = if x == 0 {
+                0.0
+            } else {
+                let delta_h_l = self.sediment[index] + self.water[index]
+                    - self.get_sediment(self.ix(x - 1, y))
+                    - self.get_water(self.ix(x - 1, y));
+                let flux_l_prev = self.flux_left[index];
+                f32::max(
+                    0.0,
+                    flux_l_prev
+                        + self.delta * self.pipe_area * ((g * delta_h_l) / self.pipe_length),
+                )
+            };
             // ...right
-            let delta_h_r = self.sediment[index] + self.water[index]
-                - self.get_sediment(self.ix(x + 1, y))
-                - self.get_water(self.ix(x + 1, y));
-            let flux_r_prev = self.flux_right[index];
-            let flux_r = f32::max(
-                0.0,
-                flux_r_prev + self.delta * self.pipe_area * ((g * delta_h_r) / self.pipe_length),
-            );
+            let flux_r = if x == WIDTH - 1 {
+                0.0
+            } else {
+                let delta_h_r = self.sediment[index] + self.water[index]
+                    - self.get_sediment(self.ix(x + 1, y))
+                    - self.get_water(self.ix(x + 1, y));
+                let flux_r_prev = self.flux_right[index];
+                f32::max(
+                    0.0,
+                    flux_r_prev
+                        + self.delta * self.pipe_area * ((g * delta_h_r) / self.pipe_length),
+                )
+            };
             // ...bottom
-            let delta_h_b = self.sediment[index] + self.water[index]
-                - self.get_sediment(self.ix(x, y - 1))
-                - self.get_water(self.ix(x, y - 1));
-            let flux_b_prev = self.flux_bottom[index];
-            let flux_b = f32::max(
-                0.0,
-                flux_b_prev + self.delta * self.pipe_area * ((g * delta_h_b) / self.pipe_length),
-            );
+            let flux_b = if y == 0 {
+                0.0
+            } else {
+                let delta_h_b = self.sediment[index] + self.water[index]
+                    - self.get_sediment(self.ix(x, y - 1))
+                    - self.get_water(self.ix(x, y - 1));
+                let flux_b_prev = self.flux_bottom[index];
+                f32::max(
+                    0.0,
+                    flux_b_prev
+                        + self.delta * self.pipe_area * ((g * delta_h_b) / self.pipe_length),
+                )
+            };
             // ...top
-            let delta_h_t = self.sediment[index] + self.water[index]
-                - self.get_sediment(self.ix(x, y + 1))
-                - self.get_water(self.ix(x, y + 1));
-            let flux_t_prev = self.flux_top[index];
-            let flux_t = f32::max(
-                0.0,
-                flux_t_prev + self.delta * self.pipe_area * ((g * delta_h_t) / self.pipe_length),
-            );
+            let flux_t = if y == HEIGHT - 1 {
+                0.0
+            } else {
+                let delta_h_t = self.sediment[index] + self.water[index]
+                    - self.get_sediment(self.ix(x, y + 1))
+                    - self.get_water(self.ix(x, y + 1));
+                let flux_t_prev = self.flux_top[index];
+                f32::max(
+                    0.0,
+                    flux_t_prev
+                        + self.delta * self.pipe_area * ((g * delta_h_t) / self.pipe_length),
+                )
+            };
             let lx = 1.0;
             let ly = 1.0;
             let k = f32::min(
@@ -158,24 +178,50 @@ impl State {
             let mut inflow_sum = 0.0;
             let outflow_sum = flux_l + flux_r + flux_b + flux_t;
             // Ensure we do not go out of bounds
-            inflow_sum += self.get_flux_right(self.ix(x - 1, y));
-            inflow_sum += self.get_flux_left(self.ix(x + 1, y));
-            inflow_sum += self.get_flux_top(self.ix(x, y - 1));
-            inflow_sum += self.get_flux_bottom(self.ix(x, y + 1));
+            if x > 0 {
+                inflow_sum += self.get_flux_right(self.ix(x - 1, y));
+            }
+            if x < WIDTH - 1 {
+                inflow_sum += self.get_flux_left(self.ix(x + 1, y));
+            }
+            if y > 0 {
+                inflow_sum += self.get_flux_top(self.ix(x, y - 1));
+            }
+            if y < HEIGHT - 1 {
+                inflow_sum += self.get_flux_bottom(self.ix(x, y + 1));
+            }
             // Calculate ΔV(x, y) according to the provided formula
             let delta_v = self.delta * (inflow_sum - outflow_sum);
             // Update the water surface with the calculated delta_v
+            let left_flux_right = if x == 0 {
+                0.0
+            } else {
+                self.get_flux_right(self.ix(x - 1, y))
+            };
+            let right_flux_left = if x == WIDTH - 1 {
+                0.0
+            } else {
+                self.get_flux_left(self.ix(x + 1, y))
+            };
+            let bottom_flux_top = if y == 0 {
+                0.0
+            } else {
+                self.get_flux_top(self.ix(x, y - 1))
+            };
+            let top_flux_bottom = if y == HEIGHT - 1 {
+                0.0
+            } else {
+                self.get_flux_bottom(self.ix(x, y + 1))
+            };
             let d2 = d1 + (delta_v / (lx * ly));
             let delta_w_x = 0.5
-                * (self.get_flux_right(self.ix(x - 1, y)) - self.flux_left[index]
-                    + self.flux_right[index]
-                    - self.get_flux_left(self.ix(x + 1, y)));
+                * (left_flux_right - self.flux_left[index] + self.flux_right[index]
+                    - right_flux_left);
             let d_avg = 0.5 * (d1 + d2);
             let u = delta_w_x / (ly * d_avg);
             let delta_w_y = 0.5
-                * (self.get_flux_top(self.ix(x, y - 1)) - self.flux_bottom[index]
-                    + self.flux_top[index]
-                    - self.get_flux_bottom(self.ix(x, y + 1)));
+                * (bottom_flux_top - self.flux_bottom[index] + self.flux_top[index]
+                    - top_flux_bottom);
             let v = delta_w_y / (lx * d_avg);
             // Update the velocity field with the calculated u and v
             self.velocity[index] = Vec2::new(u, v);
