@@ -11,8 +11,8 @@ use notan::draw::*;
 use notan::prelude::*;
 use ultraviolet::Vec2;
 
-const WIDTH: usize = 128;
-const HEIGHT: usize = 128;
+const WIDTH: usize = 64;
+const HEIGHT: usize = 64;
 const SCALE: usize = 10;
 
 #[derive(AppState)]
@@ -29,7 +29,6 @@ struct State {
     // External
     increment: Vec<f32>,
     fixed_delta: f32,
-    substeps: f32,
     pipe_area: f32,
     pipe_length: f32,
     last_step: Instant,
@@ -47,10 +46,9 @@ impl State {
             flux_top: vec![0.0; WIDTH * HEIGHT],
             velocity: vec![Vec2::zero(); WIDTH * HEIGHT],
             increment: vec![0.0; WIDTH * HEIGHT],
-            fixed_delta: 1.0 / 30.0,
-            substeps: 10.0,
+            fixed_delta: 0.01,
             pipe_area: 1.0,
-            pipe_length: 1.0,
+            pipe_length: 0.1,
             last_step: Instant::now(),
         }
     }
@@ -166,10 +164,13 @@ impl State {
             };
             let lx = 1.0;
             let ly = 1.0;
-            let k = f32::min(
+            let mut k = f32::min(
                 1.0,
                 (d1 * lx * ly) / ((flux_l + flux_r + flux_b + flux_t) * delta),
             );
+            if k.is_nan() || k.is_infinite() {
+                k = 0.0;
+            }
             let flux_l = k * flux_l;
             let flux_r = k * flux_r;
             let flux_b = k * flux_b;
@@ -235,6 +236,43 @@ impl State {
             self.water[index] = d2;
         }
     }
+    fn sediment_step(&mut self, threshold: f32) {
+        // Create a new buffer by copying the old one
+        let mut new_sediment = self.sediment.clone();
+
+        // Average out the sediment with its neighbors
+        for index in 0..WIDTH * HEIGHT {
+            let (x, y) = self.ix2(index);
+            let mut sediment_sum = self.sediment[index];
+            let mut neighbor_count = 1;
+            if x > 0 && (self.sediment[index] - self.sediment[self.ix(x - 1, y)]).abs() > threshold
+            {
+                sediment_sum += self.sediment[self.ix(x - 1, y)];
+                neighbor_count += 1;
+            }
+            if x < WIDTH - 1
+                && (self.sediment[index] - self.sediment[self.ix(x + 1, y)]).abs() > threshold
+            {
+                sediment_sum += self.sediment[self.ix(x + 1, y)];
+                neighbor_count += 1;
+            }
+            if y > 0 && (self.sediment[index] - self.sediment[self.ix(x, y - 1)]).abs() > threshold
+            {
+                sediment_sum += self.sediment[self.ix(x, y - 1)];
+                neighbor_count += 1;
+            }
+            if y < HEIGHT - 1
+                && (self.sediment[index] - self.sediment[self.ix(x, y + 1)]).abs() > threshold
+            {
+                sediment_sum += self.sediment[self.ix(x, y + 1)];
+                neighbor_count += 1;
+            }
+            new_sediment[index] = sediment_sum / neighbor_count as f32;
+        }
+
+        // Replace the old buffer with the new one
+        self.sediment = new_sediment;
+    }
 }
 
 #[notan_main]
@@ -258,8 +296,11 @@ fn setup(gfx: &mut Graphics) -> State {
 
 fn update(app: &mut App, state: &mut State) {
     let fps = app.timer.fps();
-    app.window()
-        .set_title(&format!("Virtual Pipes Demo - FPS: {}", fps));
+    let water_sum: f32 = state.water.iter().sum();
+    app.window().set_title(&format!(
+        "Virtual Pipes Demo - FPS: {}; Water: {}",
+        fps, water_sum
+    ));
     // Input
     if app.mouse.down.contains_key(&MouseButton::Left) {
         let x = (app.mouse.x / SCALE as f32) as usize;
@@ -269,12 +310,40 @@ fn update(app: &mut App, state: &mut State) {
             state.water[ix] += 5.0;
         }
     }
+    if app.mouse.down.contains_key(&MouseButton::Right) {
+        let x = (app.mouse.x / SCALE as f32) as usize;
+        let y = (app.mouse.y / SCALE as f32) as usize;
+        let ix = state.ix(x, y);
+        if ix != usize::MAX {
+            state.sediment[ix] += 0.5;
+        }
+    }
     // Simulation
     let current_time = Instant::now();
     if current_time.duration_since(state.last_step).as_secs_f32() > state.fixed_delta {
         state.last_step = current_time;
-        for _ in 0..(state.substeps as usize) {
-            state.step();
+        state.step();
+        state.sediment_step(1.5);
+    }
+    // Check for NaNs
+    for i in 0..WIDTH * HEIGHT {
+        if state.water[i].is_nan() {
+            panic!("NaN in water");
+        }
+        if state.flux_left[i].is_nan() {
+            panic!("NaN in flux_left");
+        }
+        if state.flux_right[i].is_nan() {
+            panic!("NaN in flux_right");
+        }
+        if state.flux_bottom[i].is_nan() {
+            panic!("NaN in flux_bottom");
+        }
+        if state.flux_top[i].is_nan() {
+            panic!("NaN in flux_top");
+        }
+        if state.sediment[i].is_nan() {
+            panic!("NaN in sediment");
         }
     }
 }
@@ -282,14 +351,13 @@ fn update(app: &mut App, state: &mut State) {
 fn draw(gfx: &mut Graphics, state: &mut State) {
     let mut draw = gfx.create_draw();
     draw.clear(Color::BLACK);
-    // draw.triangle((400.0, 100.0), (100.0, 500.0), (700.0, 500.0));
-    // gfx.render(&draw);
+
     for x in 0..WIDTH {
         for y in 0..HEIGHT {
             let i = x + y * WIDTH;
             let sediment = state.sediment[i];
             let water = state.water[i];
-            let color = Color::new(0.0, sediment, water, 1.0);
+            let color = Color::new(sediment / 5.0, sediment / 5.0, water / 5.0, 1.0);
             draw.rect(
                 (x as f32 * SCALE as f32, y as f32 * SCALE as f32),
                 (SCALE as f32, SCALE as f32),
