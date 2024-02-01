@@ -11,8 +11,8 @@ use notan::draw::*;
 use notan::prelude::*;
 use ultraviolet::Vec2;
 
-const WIDTH: usize = 64;
-const HEIGHT: usize = 64;
+const WIDTH: usize = 128;
+const HEIGHT: usize = 128;
 const SCALE: usize = 10;
 
 #[derive(AppState)]
@@ -28,9 +28,11 @@ struct State {
     velocity: Vec<Vec2>,
     // External
     increment: Vec<f32>,
-    delta: f32,
+    fixed_delta: f32,
+    substeps: f32,
     pipe_area: f32,
     pipe_length: f32,
+    last_step: Instant,
 }
 
 impl State {
@@ -45,9 +47,11 @@ impl State {
             flux_top: vec![0.0; WIDTH * HEIGHT],
             velocity: vec![Vec2::zero(); WIDTH * HEIGHT],
             increment: vec![0.0; WIDTH * HEIGHT],
-            delta: 0.1,
+            fixed_delta: 1.0 / 30.0,
+            substeps: 10.0,
             pipe_area: 1.0,
             pipe_length: 1.0,
+            last_step: Instant::now(),
         }
     }
     fn ix(&self, x: usize, y: usize) -> usize {
@@ -99,11 +103,12 @@ impl State {
     }
 
     fn step(&mut self) {
+        let delta = self.fixed_delta;
         for index in 0..WIDTH * HEIGHT {
             let (x, y) = self.ix2(index);
 
             // 3.1 Water Increment
-            let d1 = self.water[index] + self.delta * self.increment[index];
+            let d1 = self.water[index] + delta * self.increment[index];
             // 3.2 Flow Simulation
             // 3.2.1 Output Flux Computation
             let g = 9.81;
@@ -117,8 +122,7 @@ impl State {
                 let flux_l_prev = self.flux_left[index];
                 f32::max(
                     0.0,
-                    flux_l_prev
-                        + self.delta * self.pipe_area * ((g * delta_h_l) / self.pipe_length),
+                    flux_l_prev + delta * self.pipe_area * ((g * delta_h_l) / self.pipe_length),
                 )
             };
             // ...right
@@ -131,8 +135,7 @@ impl State {
                 let flux_r_prev = self.flux_right[index];
                 f32::max(
                     0.0,
-                    flux_r_prev
-                        + self.delta * self.pipe_area * ((g * delta_h_r) / self.pipe_length),
+                    flux_r_prev + delta * self.pipe_area * ((g * delta_h_r) / self.pipe_length),
                 )
             };
             // ...bottom
@@ -145,8 +148,7 @@ impl State {
                 let flux_b_prev = self.flux_bottom[index];
                 f32::max(
                     0.0,
-                    flux_b_prev
-                        + self.delta * self.pipe_area * ((g * delta_h_b) / self.pipe_length),
+                    flux_b_prev + delta * self.pipe_area * ((g * delta_h_b) / self.pipe_length),
                 )
             };
             // ...top
@@ -159,15 +161,14 @@ impl State {
                 let flux_t_prev = self.flux_top[index];
                 f32::max(
                     0.0,
-                    flux_t_prev
-                        + self.delta * self.pipe_area * ((g * delta_h_t) / self.pipe_length),
+                    flux_t_prev + delta * self.pipe_area * ((g * delta_h_t) / self.pipe_length),
                 )
             };
             let lx = 1.0;
             let ly = 1.0;
             let k = f32::min(
                 1.0,
-                (d1 * lx * ly) / ((flux_l + flux_r + flux_b + flux_t) * self.delta),
+                (d1 * lx * ly) / ((flux_l + flux_r + flux_b + flux_t) * delta),
             );
             let flux_l = k * flux_l;
             let flux_r = k * flux_r;
@@ -191,7 +192,7 @@ impl State {
                 inflow_sum += self.get_flux_bottom(self.ix(x, y + 1));
             }
             // Calculate ΔV(x, y) according to the provided formula
-            let delta_v = self.delta * (inflow_sum - outflow_sum);
+            let delta_v = delta * (inflow_sum - outflow_sum);
             // Update the water surface with the calculated delta_v
             let left_flux_right = if x == 0 {
                 0.0
@@ -265,13 +266,17 @@ fn update(app: &mut App, state: &mut State) {
         let y = (app.mouse.y / SCALE as f32) as usize;
         let ix = state.ix(x, y);
         if ix != usize::MAX {
-            state.water[ix] += 1.0;
+            state.water[ix] += 5.0;
         }
     }
     // Simulation
-    let start_time = Instant::now();
-    state.step();
-    let elapsed = start_time.elapsed();
+    let current_time = Instant::now();
+    if current_time.duration_since(state.last_step).as_secs_f32() > state.fixed_delta {
+        state.last_step = current_time;
+        for _ in 0..(state.substeps as usize) {
+            state.step();
+        }
+    }
 }
 
 fn draw(gfx: &mut Graphics, state: &mut State) {
