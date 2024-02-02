@@ -9,10 +9,12 @@ use std::time::Instant;
 
 use notan::draw::*;
 use notan::prelude::*;
+use palette::Mix;
+use palette::Srgb;
 use ultraviolet::Vec2;
 
-const WIDTH: usize = 64;
-const HEIGHT: usize = 64;
+const WIDTH: usize = 128;
+const HEIGHT: usize = 128;
 const SCALE: usize = 10;
 
 #[derive(AppState)]
@@ -307,7 +309,7 @@ fn update(app: &mut App, state: &mut State) {
         let y = (app.mouse.y / SCALE as f32) as usize;
         let ix = state.ix(x, y);
         if ix != usize::MAX {
-            state.water[ix] += 5.0;
+            state.water[ix] += 1.0;
         }
     }
     if app.mouse.down.contains_key(&MouseButton::Right) {
@@ -315,7 +317,7 @@ fn update(app: &mut App, state: &mut State) {
         let y = (app.mouse.y / SCALE as f32) as usize;
         let ix = state.ix(x, y);
         if ix != usize::MAX {
-            state.sediment[ix] += 0.5;
+            state.sediment[ix] += 2.0;
         }
     }
     // Simulation
@@ -323,7 +325,7 @@ fn update(app: &mut App, state: &mut State) {
     if current_time.duration_since(state.last_step).as_secs_f32() > state.fixed_delta {
         state.last_step = current_time;
         state.step();
-        state.sediment_step(1.5);
+        state.sediment_step(2.0);
     }
     // Check for NaNs
     for i in 0..WIDTH * HEIGHT {
@@ -348,6 +350,10 @@ fn update(app: &mut App, state: &mut State) {
     }
 }
 
+fn srgb_to_color(srgb: Srgb) -> Color {
+    Color::new(srgb.red, srgb.green, srgb.blue, 1.0)
+}
+
 fn draw(gfx: &mut Graphics, state: &mut State) {
     let mut draw = gfx.create_draw();
     draw.clear(Color::BLACK);
@@ -357,7 +363,12 @@ fn draw(gfx: &mut Graphics, state: &mut State) {
             let i = x + y * WIDTH;
             let sediment = state.sediment[i];
             let water = state.water[i];
-            let color = Color::new(sediment / 5.0, sediment / 5.0, water / 5.0, 1.0);
+
+            let factor = 10.0;
+            let sediment_color = Srgb::new(sediment / factor, sediment / factor, 0.0).into_linear();
+            let water_color = Srgb::new(0.0, 0.0, 1.0).into_linear();
+            let color = sediment_color.mix(water_color, water / factor);
+            let color = srgb_to_color(color.into());
             draw.rect(
                 (x as f32 * SCALE as f32, y as f32 * SCALE as f32),
                 (SCALE as f32, SCALE as f32),
