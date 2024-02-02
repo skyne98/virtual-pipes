@@ -7,6 +7,7 @@ United States. pp.47-56, ff10.1109/PG.2007.15ff. ffinria-00402079
 use std::cmp::max;
 use std::time::Instant;
 
+use noise::{NoiseFn, Perlin, Seedable};
 use notan::draw::*;
 use notan::prelude::*;
 use palette::Mix;
@@ -16,13 +17,17 @@ use ultraviolet::Vec2;
 const WIDTH: usize = 128;
 const HEIGHT: usize = 128;
 const SCALE: usize = 10;
+const CELL_SIZE: f32 = 1.0;
+const CAPACITY_K: f32 = 0.025;
 
 #[derive(AppState)]
 struct State {
+    perlin: Perlin,
     // Cell
     sediment: Vec<f32>,
     water: Vec<f32>,
     suspended_sediment: Vec<f32>,
+    suspended_sediment_1: Vec<f32>,
     flux_left: Vec<f32>,
     flux_right: Vec<f32>,
     flux_bottom: Vec<f32>,
@@ -38,10 +43,27 @@ struct State {
 
 impl State {
     fn new() -> Self {
+        let perlin = Perlin::new(1);
+        let mut sediment = vec![0.0; WIDTH * HEIGHT];
+        for x in 0..WIDTH {
+            for y in 0..HEIGHT {
+                let i = x + y * WIDTH;
+                let nx = x as f64 / WIDTH as f64 - 0.5;
+                let nx = nx * 4.0;
+                let ny = y as f64 / HEIGHT as f64 - 0.5;
+                let ny = ny * 4.0;
+                let nz = 0.0;
+                let value = perlin.get([nx, ny, nz]);
+                sediment[i] = (value * 10.0 + 10.0).max(0.0).min(20.0) as f32;
+            }
+        }
+
         Self {
-            sediment: vec![0.0; WIDTH * HEIGHT],
+            perlin,
+            sediment,
             water: vec![0.0; WIDTH * HEIGHT],
             suspended_sediment: vec![0.0; WIDTH * HEIGHT],
+            suspended_sediment_1: vec![0.0; WIDTH * HEIGHT],
             flux_left: vec![0.0; WIDTH * HEIGHT],
             flux_right: vec![0.0; WIDTH * HEIGHT],
             flux_bottom: vec![0.0; WIDTH * HEIGHT],
@@ -56,7 +78,8 @@ impl State {
     }
     fn ix(&self, x: usize, y: usize) -> usize {
         if x >= WIDTH || y >= HEIGHT {
-            return usize::MAX;
+            // tile the edges
+            return self.ix(x % WIDTH, y % HEIGHT);
         }
         x + y * WIDTH
     }
@@ -100,6 +123,47 @@ impl State {
             return 0.0;
         }
         self.flux_top[index]
+    }
+    fn get_tilt(&self, index: usize) -> f32 {
+        if index >= WIDTH * HEIGHT {
+            return 0.0;
+        }
+        let (x, y) = self.ix2(index);
+        let diff_left = if x == 0 {
+            0.0
+        } else {
+            (self.sediment[index] - self.sediment[self.ix(x - 1, y)]).abs()
+        };
+        let diff_right = if x == WIDTH - 1 {
+            0.0
+        } else {
+            (self.sediment[index] - self.sediment[self.ix(x + 1, y)]).abs()
+        };
+        let diff_bottom = if y == 0 {
+            0.0
+        } else {
+            (self.sediment[index] - self.sediment[self.ix(x, y - 1)]).abs()
+        };
+        let diff_top = if y == HEIGHT - 1 {
+            0.0
+        } else {
+            (self.sediment[index] - self.sediment[self.ix(x, y + 1)]).abs()
+        };
+        let max_diff = f32::max(
+            f32::max(diff_left, diff_right),
+            f32::max(diff_bottom, diff_top),
+        );
+        let tilt_angle = f32::atan(max_diff / (CELL_SIZE * CELL_SIZE));
+        if tilt_angle < 0.0 {
+            panic!("tilt_angle is negative");
+        }
+        if tilt_angle > 90.0 {
+            panic!("tilt_angle is greater than 90 degrees");
+        }
+        if tilt_angle.is_nan() || tilt_angle.is_infinite() {
+            panic!("tilt_angle is NaN or infinite");
+        }
+        tilt_angle
     }
 
     fn step(&mut self) {
@@ -164,19 +228,36 @@ impl State {
                     flux_t_prev + delta * self.pipe_area * ((g * delta_h_t) / self.pipe_length),
                 )
             };
-            let lx = 1.0;
-            let ly = 1.0;
-            let mut k = f32::min(
+            let lx = CELL_SIZE;
+            let ly = CELL_SIZE;
+            let k = f32::min(
                 1.0,
                 (d1 * lx * ly) / ((flux_l + flux_r + flux_b + flux_t) * delta),
             );
             if k.is_nan() || k.is_infinite() {
-                k = 0.0;
+                panic!("k is NaN or infinite; d1: {}; lx: {}; ly: {}; flux_l: {}; flux_r: {}; flux_b: {}; flux_t: {}; delta: {}",
+                    d1, lx, ly, flux_l, flux_r, flux_b, flux_t, delta
+                );
             }
             let flux_l = k * flux_l;
             let flux_r = k * flux_r;
             let flux_b = k * flux_b;
             let flux_t = k * flux_t;
+
+            // Boundary conditions
+            if x == 0 {
+                self.flux_left[index] = 0.0;
+            }
+            if x == WIDTH - 1 {
+                self.flux_right[index] = 0.0;
+            }
+            if y == 0 {
+                self.flux_bottom[index] = 0.0;
+            }
+            if y == HEIGHT - 1 {
+                self.flux_top[index] = 0.0;
+            }
+
             // 3.2.2 Water Surface and Velocity Field Update
             // Additional variables we might need, assuming they are defined similarly to your existing variables
             let mut inflow_sum = 0.0;
@@ -221,21 +302,114 @@ impl State {
             let delta_w_x = 0.5
                 * (left_flux_right - self.flux_left[index] + self.flux_right[index]
                     - right_flux_left);
-            let d_avg = 0.5 * (d1 + d2);
-            let u = delta_w_x / (ly * d_avg);
             let delta_w_y = 0.5
                 * (bottom_flux_top - self.flux_bottom[index] + self.flux_top[index]
                     - top_flux_bottom);
-            let v = delta_w_y / (lx * d_avg);
             // Update the velocity field with the calculated u and v
-            self.velocity[index] = Vec2::new(u, v);
+            let u = delta_w_x;
+            let v = delta_w_y;
+            assert!(!u.is_nan(), "u is NaN");
+            assert!(!v.is_nan(), "v is NaN");
+            let velocity = Vec2::new(u, v);
+            self.velocity[index] = velocity.clone();
             self.flux_left[index] = flux_l;
             self.flux_right[index] = flux_r;
             self.flux_bottom[index] = flux_b;
             self.flux_top[index] = flux_t;
 
-            // Temporarily, just set the water to the new value
-            self.water[index] = d2;
+            // 3.3 Erosion and Deposition
+            let k_c = CAPACITY_K;
+            // calculate based on difference in sediment level with neighbors
+            let tilt_angle = self.get_tilt(index);
+            if velocity.x.is_nan() || velocity.x.is_infinite() {
+                panic!("velocity.x is NaN or infinite");
+            }
+            if velocity.y.is_nan() || velocity.y.is_infinite() {
+                panic!("velocity.y is NaN or infinite");
+            }
+            let c = k_c * f32::sin(tilt_angle) * velocity.mag();
+            if c.is_nan() || c.is_infinite() {
+                panic!(
+                    "c is NaN or infinite; tilt_angle: {}; velocity.mag(): {}; velocity: {:?}",
+                    tilt_angle,
+                    velocity.mag(),
+                    velocity
+                );
+            }
+            if c < 0.0 {
+                panic!(
+                    "c is negative; tilt_angle: {}; velocity.mag(): {}; velocity: {:?}",
+                    tilt_angle,
+                    velocity.mag(),
+                    velocity
+                );
+            }
+            let k_s = 0.005;
+            let k_d = 0.02;
+            let (b, s1) = if c > self.suspended_sediment[index] {
+                let change_amount = k_s * (c - self.suspended_sediment[index]);
+                let change_amount = f32::min(change_amount, self.sediment[index]);
+                (
+                    self.sediment[index] - change_amount,
+                    self.suspended_sediment[index] + change_amount,
+                )
+            } else {
+                let change_amount = k_d * (self.suspended_sediment[index] - c);
+                let change_amount = f32::min(change_amount, self.suspended_sediment[index]);
+                (
+                    self.sediment[index] + change_amount,
+                    self.suspended_sediment[index] - change_amount,
+                )
+            };
+            if b.is_nan() || b.is_infinite() {
+                panic!("b is NaN or infinite");
+            }
+            self.sediment[index] = b;
+            self.suspended_sediment_1[index] = s1;
+            // self.suspended_sediment[index] = s1;
+
+            // Temporarily
+            self.water[index] = f32::max(0.0, d2);
+        }
+
+        // 3.4 Sediment Transportation
+        for index in 0..WIDTH * HEIGHT {
+            let (x, y) = self.ix2(index);
+            let velocity = self.velocity[index];
+            let s_x = x as f32 - velocity.x * delta;
+            let s_y = y as f32 - velocity.y * delta;
+            if s_x < 0.0 || s_x >= WIDTH as f32 || s_y < 0.0 || s_y >= HEIGHT as f32 {
+                continue;
+            }
+            // get four closest grid points
+            let s_x_floor = s_x.floor() as usize;
+            let s_x_ceil = s_x.ceil() as usize;
+            let s_y_floor = s_y.floor() as usize;
+            let s_y_ceil = s_y.ceil() as usize;
+            assert!(s_x_floor == s_x_ceil || s_x_floor + 1 == s_x_ceil);
+            assert!(s_y_floor == s_y_ceil || s_y_floor + 1 == s_y_ceil);
+
+            let bottom_left_index = self.ix(s_x_floor, s_y_floor);
+            let bottom_right_index = self.ix(s_x_ceil, s_y_floor);
+            let top_left_index = self.ix(s_x_floor, s_y_ceil);
+            let top_right_index = self.ix(s_x_ceil, s_y_ceil);
+
+            let bottom_left_suspended = self.suspended_sediment_1[bottom_left_index];
+            let bottom_right_suspended = self.suspended_sediment_1[bottom_right_index];
+            let top_left_suspended = self.suspended_sediment_1[top_left_index];
+            let top_right_suspended = self.suspended_sediment_1[top_right_index];
+
+            let left_fraction = s_x_ceil as f32 - s_x;
+            let right_fraction = s_x - s_x_floor as f32;
+            let bottom_interpolated =
+                bottom_left_suspended * left_fraction + bottom_right_suspended * right_fraction;
+            let top_interpolated =
+                top_left_suspended * left_fraction + top_right_suspended * right_fraction;
+            let bottom_fraction = s_y_ceil as f32 - s_y;
+            let top_fraction = s_y - s_y_floor as f32;
+            let interpolated =
+                bottom_interpolated * bottom_fraction + top_interpolated * top_fraction;
+            self.suspended_sediment[index] = interpolated;
         }
     }
     fn sediment_step(&mut self, threshold: f32) {
@@ -299,10 +473,24 @@ fn setup(gfx: &mut Graphics) -> State {
 fn update(app: &mut App, state: &mut State) {
     let fps = app.timer.fps();
     let water_sum: f32 = state.water.iter().sum();
-    app.window().set_title(&format!(
-        "Virtual Pipes Demo - FPS: {}; Water: {}",
-        fps, water_sum
-    ));
+    let sediment_sum: f32 = state.sediment.iter().sum();
+    let suspended_sediment_sum: f32 = state.suspended_sediment.iter().sum();
+    let sediment_and_suspend_sediment_sum = sediment_sum + suspended_sediment_sum;
+    // Display stats under the mouse cursor
+    let mouse_x = (app.mouse.x / SCALE as f32) as usize;
+    let mouse_y = (app.mouse.y / SCALE as f32) as usize;
+    let mouse_ix = state.ix(mouse_x, mouse_y);
+    if mouse_ix != usize::MAX {
+        let mouse_ix = mouse_ix;
+        let mouse_sediment = state.get_sediment(mouse_ix);
+        let mouse_water = state.get_water(mouse_ix);
+        let mouse_suspend_sediment = state.suspended_sediment[mouse_ix];
+        let mouse_tilt = state.get_tilt(mouse_ix);
+        app.window().set_title(&format!(
+            "Virtual Pipes Demo - FPS: {:.2}; Sediment: {:.2}; Suspended: {:.2}; Sum: {:.2}; Water: {:.2}; [Sediment: {:.2}; Water: {:.2}; Suspended Sediment: {:.2}, Tilt: {:.2}]",
+            fps, sediment_sum, suspended_sediment_sum, sediment_and_suspend_sediment_sum, water_sum, mouse_sediment, mouse_water, mouse_suspend_sediment, mouse_tilt
+        ));
+    }
     // Input
     if app.mouse.down.contains_key(&MouseButton::Left) {
         let x = (app.mouse.x / SCALE as f32) as usize;
@@ -325,7 +513,7 @@ fn update(app: &mut App, state: &mut State) {
     if current_time.duration_since(state.last_step).as_secs_f32() > state.fixed_delta {
         state.last_step = current_time;
         state.step();
-        state.sediment_step(2.0);
+        // state.sediment_step(2.0);
     }
     // Check for NaNs
     for i in 0..WIDTH * HEIGHT {
@@ -362,12 +550,17 @@ fn draw(gfx: &mut Graphics, state: &mut State) {
         for y in 0..HEIGHT {
             let i = x + y * WIDTH;
             let sediment = state.sediment[i];
+            let suspended = state.suspended_sediment[i];
             let water = state.water[i];
 
             let factor = 10.0;
             let sediment_color = Srgb::new(sediment / factor, sediment / factor, 0.0).into_linear();
+            let suspended_color = Srgb::new(0.0, suspended / CAPACITY_K, 0.0).into_linear();
             let water_color = Srgb::new(0.0, 0.0, 1.0).into_linear();
-            let color = sediment_color.mix(water_color, water / factor);
+            let color = sediment_color.mix(
+                water_color.mix(suspended_color, suspended / CAPACITY_K),
+                water / factor,
+            );
             let color = srgb_to_color(color.into());
             draw.rect(
                 (x as f32 * SCALE as f32, y as f32 * SCALE as f32),

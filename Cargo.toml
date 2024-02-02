@@ -6,6 +6,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+noise = "0.8.2"
 notan = { version = "0.11.0" }
 palette = "0.7.4"
 rand = { version = "0.8.5" }
