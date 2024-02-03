@@ -4,19 +4,15 @@ on GPU. PG ’07 - 15th Pacific Conference on Computer Graphics and Applications
 United States. pp.47-56, ff10.1109/PG.2007.15ff. ffinria-00402079
 */
 
-use std::cmp::max;
 use std::time::Instant;
 
-use noise::{NoiseFn, Perlin, Seedable};
+use nalgebra::*;
+use noise::{NoiseFn, Perlin};
 use notan::draw::*;
 use notan::prelude::*;
-use palette::blend::Blend;
 use palette::Mix;
 use palette::Srgb;
 use palette::Srgba;
-use ultraviolet::Rotor3;
-use ultraviolet::Vec2;
-use ultraviolet::Vec3;
 
 const WIDTH: usize = 128;
 const HEIGHT: usize = 128;
@@ -32,18 +28,15 @@ struct State {
     water: Vec<f32>,
     suspended_sediment: Vec<f32>,
     suspended_sediment_1: Vec<f32>,
-    flux_left: Vec<f32>,
-    flux_right: Vec<f32>,
-    flux_bottom: Vec<f32>,
-    flux_top: Vec<f32>,
-    velocity: Vec<Vec2>,
+    flux: Vec<Vector4<f32>>, // left, right, bottom, top
+    velocity: Vec<Vector2<f32>>,
     // External
     increment: Vec<f32>,
     fixed_delta: f32,
     pipe_area: f32,
     pipe_length: f32,
     last_step: Instant,
-    light_direction: Vec3,
+    light_direction: Vector3<f32>,
 }
 
 impl State {
@@ -81,17 +74,14 @@ impl State {
             water: vec![0.0; WIDTH * HEIGHT],
             suspended_sediment: vec![0.0; WIDTH * HEIGHT],
             suspended_sediment_1: vec![0.0; WIDTH * HEIGHT],
-            flux_left: vec![0.0; WIDTH * HEIGHT],
-            flux_right: vec![0.0; WIDTH * HEIGHT],
-            flux_bottom: vec![0.0; WIDTH * HEIGHT],
-            flux_top: vec![0.0; WIDTH * HEIGHT],
-            velocity: vec![Vec2::zero(); WIDTH * HEIGHT],
+            flux: vec![Vector4::zeros(); WIDTH * HEIGHT],
+            velocity: vec![Vector2::zeros(); WIDTH * HEIGHT],
             increment: vec![0.0; WIDTH * HEIGHT],
             fixed_delta: 0.01,
             pipe_area: 1.0,
             pipe_length: 0.1,
             last_step: Instant::now(),
-            light_direction: Vec3::new(1.0, 1.0, 1.0).normalized(),
+            light_direction: Vector3::new(1.0, 1.0, 1.0).normalize(),
         }
     }
     fn ix(&self, x: usize, y: usize) -> usize {
@@ -119,73 +109,55 @@ impl State {
         self.water[index]
     }
     fn get_flux_left(&self, index: usize) -> f32 {
-        if index >= WIDTH * HEIGHT {
-            return 0.0;
-        }
-        self.flux_left[index]
+        self.flux[index].x
+    }
+    fn set_flux_left(&mut self, index: usize, value: f32) {
+        self.flux[index].x = value;
     }
     fn get_flux_right(&self, index: usize) -> f32 {
-        if index >= WIDTH * HEIGHT {
-            return 0.0;
-        }
-        self.flux_right[index]
+        self.flux[index].y
+    }
+    fn set_flux_right(&mut self, index: usize, value: f32) {
+        self.flux[index].y = value;
     }
     fn get_flux_bottom(&self, index: usize) -> f32 {
-        if index >= WIDTH * HEIGHT {
-            return 0.0;
-        }
-        self.flux_bottom[index]
+        self.flux[index].z
+    }
+    fn set_flux_bottom(&mut self, index: usize, value: f32) {
+        self.flux[index].z = value;
     }
     fn get_flux_top(&self, index: usize) -> f32 {
-        if index >= WIDTH * HEIGHT {
-            return 0.0;
-        }
-        self.flux_top[index]
+        self.flux[index].w
+    }
+    fn set_flux_top(&mut self, index: usize, value: f32) {
+        self.flux[index].w = value;
+    }
+    /// Get the four neighbors of a cell:
+    /// left, right, bottom, top
+    fn get_neighbors(&self, index: usize) -> Vector4<usize> {
+        let (x, y) = self.ix2(index);
+        let left = self.ix(x - 1, y);
+        let right = self.ix(x + 1, y);
+        let bottom = self.ix(x, y - 1);
+        let top = self.ix(x, y + 1);
+        Vector4::new(left, right, bottom, top)
     }
     fn get_tilt(&self, index: usize) -> f32 {
-        if index >= WIDTH * HEIGHT {
-            return 0.0;
-        }
-        let (x, y) = self.ix2(index);
-        let diff_left = if x == 0 {
-            0.0
-        } else {
-            (self.sediment[index] - self.sediment[self.ix(x - 1, y)]).abs()
-        };
-        let diff_right = if x == WIDTH - 1 {
-            0.0
-        } else {
-            (self.sediment[index] - self.sediment[self.ix(x + 1, y)]).abs()
-        };
-        let diff_bottom = if y == 0 {
-            0.0
-        } else {
-            (self.sediment[index] - self.sediment[self.ix(x, y - 1)]).abs()
-        };
-        let diff_top = if y == HEIGHT - 1 {
-            0.0
-        } else {
-            (self.sediment[index] - self.sediment[self.ix(x, y + 1)]).abs()
-        };
-        let max_diff = f32::max(
-            f32::max(diff_left, diff_right),
-            f32::max(diff_bottom, diff_top),
+        // use the normal to calculate the tilt
+        let normal = self.get_normal(index);
+        let tilt = f32::acos(normal.z);
+        assert!(!tilt.is_nan(), "tilt is NaN");
+        assert!(!tilt.is_infinite(), "tilt is infinite");
+        assert!(tilt >= 0.0, "tilt is negative");
+        assert!(
+            tilt <= std::f32::consts::PI / 2.0,
+            "tilt is greater than PI"
         );
-        let tilt_angle = f32::atan(max_diff / (CELL_SIZE * CELL_SIZE));
-        if tilt_angle < 0.0 {
-            panic!("tilt_angle is negative");
-        }
-        if tilt_angle > 90.0 {
-            panic!("tilt_angle is greater than 90 degrees");
-        }
-        if tilt_angle.is_nan() || tilt_angle.is_infinite() {
-            panic!("tilt_angle is NaN or infinite");
-        }
-        tilt_angle
+        tilt
     }
-    fn get_normal(&self, index: usize) -> Vec3 {
+    fn get_normal(&self, index: usize) -> Vector3<f32> {
         if index >= WIDTH * HEIGHT {
-            return Vec3::zero();
+            return Vector3::zeros();
         }
         let (x, y) = self.ix2(index);
         let diff_left = if x == 0 {
@@ -209,9 +181,9 @@ impl State {
             self.sediment[index] - self.sediment[self.ix(x, y + 1)]
         };
 
-        let normal_x = Vec3::new(1.0, 0.0, diff_left - diff_right);
-        let normal_y = Vec3::new(0.0, 1.0, diff_bottom - diff_top);
-        normal_x.cross(normal_y).normalized()
+        let normal_x = Vector3::new(1.0, 0.0, diff_left - diff_right);
+        let normal_y = Vector3::new(0.0, 1.0, diff_bottom - diff_top);
+        normal_x.cross(&normal_y).normalize()
     }
     fn get_normal_color(&self, index: usize) -> Srgb {
         let normal = self.get_normal(index);
@@ -225,7 +197,7 @@ impl State {
         let b = ((normal.z * 128.0) + 128.0) as u8;
         Srgb::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
     }
-    fn raycast_terrain(&self, x: f32, y: f32, direction: Vec3) -> f32 {
+    fn raycast_terrain(&self, x: f32, y: f32, direction: Vector3<f32>) -> f32 {
         if direction.x == 0.0 && direction.y == 0.0 {
             return 0.0;
         }
@@ -258,96 +230,51 @@ impl State {
             let (x, y) = self.ix2(index);
 
             // 3.1 Water Increment
+            let neighbors_ix = self.get_neighbors(index);
             let d1 = self.water[index] + delta * self.increment[index];
             // 3.2 Flow Simulation
             // 3.2.1 Output Flux Computation
             let g = 9.81;
             // ...left
-            let flux_l = if x == 0 {
-                0.0
-            } else {
-                let delta_h_l = self.sediment[index] + self.water[index]
-                    - self.get_sediment(self.ix(x - 1, y))
-                    - self.get_water(self.ix(x - 1, y));
-                let flux_l_prev = self.flux_left[index];
+            let delta_h = neighbors_ix.map(|ix| {
+                self.sediment[index] + self.water[index] - self.sediment[ix] - self.water[ix]
+            });
+            let flux_ix = Vector4::new(0usize, 1, 2, 3);
+            let flux_prev = self.flux[index];
+            let flux = flux_ix.map(|i| {
                 f32::max(
                     0.0,
-                    flux_l_prev + delta * self.pipe_area * ((g * delta_h_l) / self.pipe_length),
+                    flux_prev[i] + delta * self.pipe_area * ((g * delta_h[i]) / self.pipe_length),
                 )
-            };
-            // ...right
-            let flux_r = if x == WIDTH - 1 {
-                0.0
-            } else {
-                let delta_h_r = self.sediment[index] + self.water[index]
-                    - self.get_sediment(self.ix(x + 1, y))
-                    - self.get_water(self.ix(x + 1, y));
-                let flux_r_prev = self.flux_right[index];
-                f32::max(
-                    0.0,
-                    flux_r_prev + delta * self.pipe_area * ((g * delta_h_r) / self.pipe_length),
-                )
-            };
-            // ...bottom
-            let flux_b = if y == 0 {
-                0.0
-            } else {
-                let delta_h_b = self.sediment[index] + self.water[index]
-                    - self.get_sediment(self.ix(x, y - 1))
-                    - self.get_water(self.ix(x, y - 1));
-                let flux_b_prev = self.flux_bottom[index];
-                f32::max(
-                    0.0,
-                    flux_b_prev + delta * self.pipe_area * ((g * delta_h_b) / self.pipe_length),
-                )
-            };
-            // ...top
-            let flux_t = if y == HEIGHT - 1 {
-                0.0
-            } else {
-                let delta_h_t = self.sediment[index] + self.water[index]
-                    - self.get_sediment(self.ix(x, y + 1))
-                    - self.get_water(self.ix(x, y + 1));
-                let flux_t_prev = self.flux_top[index];
-                f32::max(
-                    0.0,
-                    flux_t_prev + delta * self.pipe_area * ((g * delta_h_t) / self.pipe_length),
-                )
-            };
+            });
             let lx = CELL_SIZE;
             let ly = CELL_SIZE;
-            let k = f32::min(
-                1.0,
-                (d1 * lx * ly) / ((flux_l + flux_r + flux_b + flux_t) * delta),
-            );
+            let k = f32::min(1.0, (d1 * lx * ly) / ((flux.sum()) * delta));
             if k.is_nan() || k.is_infinite() {
                 panic!("k is NaN or infinite; d1: {}; lx: {}; ly: {}; flux_l: {}; flux_r: {}; flux_b: {}; flux_t: {}; delta: {}",
-                    d1, lx, ly, flux_l, flux_r, flux_b, flux_t, delta
+                    d1, lx, ly, flux.x, flux.y, flux.z, flux.w, delta
                 );
             }
-            let flux_l = k * flux_l;
-            let flux_r = k * flux_r;
-            let flux_b = k * flux_b;
-            let flux_t = k * flux_t;
+            let mut flux = flux * k;
 
             // Boundary conditions
             if x == 0 {
-                self.flux_left[index] = 0.0;
+                flux.x = 0.0;
             }
             if x == WIDTH - 1 {
-                self.flux_right[index] = 0.0;
+                flux.y = 0.0;
             }
             if y == 0 {
-                self.flux_bottom[index] = 0.0;
+                flux.z = 0.0;
             }
             if y == HEIGHT - 1 {
-                self.flux_top[index] = 0.0;
+                flux.w = 0.0;
             }
 
             // 3.2.2 Water Surface and Velocity Field Update
             // Additional variables we might need, assuming they are defined similarly to your existing variables
             let mut inflow_sum = 0.0;
-            let outflow_sum = flux_l + flux_r + flux_b + flux_t;
+            let outflow_sum = flux.sum();
             // Ensure we do not go out of bounds
             if x > 0 {
                 inflow_sum += self.get_flux_right(self.ix(x - 1, y));
@@ -386,22 +313,19 @@ impl State {
             };
             let d2 = d1 + (delta_v / (lx * ly));
             let delta_w_x = 0.5
-                * (left_flux_right - self.flux_left[index] + self.flux_right[index]
+                * (left_flux_right - self.get_flux_left(index) + self.get_flux_right(index)
                     - right_flux_left);
             let delta_w_y = 0.5
-                * (bottom_flux_top - self.flux_bottom[index] + self.flux_top[index]
+                * (bottom_flux_top - self.get_flux_top(index) + self.get_flux_bottom(index)
                     - top_flux_bottom);
             // Update the velocity field with the calculated u and v
             let u = delta_w_x;
             let v = delta_w_y;
             assert!(!u.is_nan(), "u is NaN");
             assert!(!v.is_nan(), "v is NaN");
-            let velocity = Vec2::new(u, v);
+            let velocity = Vector2::new(u, v);
             self.velocity[index] = velocity.clone();
-            self.flux_left[index] = flux_l;
-            self.flux_right[index] = flux_r;
-            self.flux_bottom[index] = flux_b;
-            self.flux_top[index] = flux_t;
+            self.flux[index] = flux.clone();
 
             // 3.3 Erosion and Deposition
             let k_c = CAPACITY_K;
@@ -413,12 +337,12 @@ impl State {
             if velocity.y.is_nan() || velocity.y.is_infinite() {
                 panic!("velocity.y is NaN or infinite");
             }
-            let c = k_c * f32::sin(tilt_angle) * velocity.mag();
+            let c = k_c * f32::sin(tilt_angle) * velocity.magnitude();
             if c.is_nan() || c.is_infinite() {
                 panic!(
                     "c is NaN or infinite; tilt_angle: {}; velocity.mag(): {}; velocity: {:?}",
                     tilt_angle,
-                    velocity.mag(),
+                    velocity.magnitude(),
                     velocity
                 );
             }
@@ -426,7 +350,7 @@ impl State {
                 panic!(
                     "c is negative; tilt_angle: {}; velocity.mag(): {}; velocity: {:?}",
                     tilt_angle,
-                    velocity.mag(),
+                    velocity.magnitude(),
                     velocity
                 );
             }
@@ -607,16 +531,16 @@ fn update(app: &mut App, state: &mut State) {
         if state.water[i].is_nan() {
             panic!("NaN in water");
         }
-        if state.flux_left[i].is_nan() {
+        if state.get_flux_left(i).is_nan() {
             panic!("NaN in flux_left");
         }
-        if state.flux_right[i].is_nan() {
+        if state.get_flux_right(i).is_nan() {
             panic!("NaN in flux_right");
         }
-        if state.flux_bottom[i].is_nan() {
+        if state.get_flux_bottom(i).is_nan() {
             panic!("NaN in flux_bottom");
         }
-        if state.flux_top[i].is_nan() {
+        if state.get_flux_top(i).is_nan() {
             panic!("NaN in flux_top");
         }
         if state.sediment[i].is_nan() {
@@ -640,7 +564,6 @@ fn draw(gfx: &mut Graphics, state: &mut State) {
         for y in 0..HEIGHT {
             let i = x + y * WIDTH;
             let sediment = state.sediment[i];
-            let suspended = state.suspended_sediment[i];
             let water = state.water[i];
 
             let ambient_light = 0.35;
@@ -666,9 +589,9 @@ fn draw(gfx: &mut Graphics, state: &mut State) {
             };
             let normal = state.get_normal(i);
             let light_direction = state.light_direction.clone();
-            let sky_light_direction = Vec3::new(0.0, 0.0, 1.0).normalized();
-            let diffuse = f32::max(ambient_light, normal.dot(light_direction));
-            let sky_diffuse = f32::max(ambient_light, normal.dot(sky_light_direction));
+            let sky_light_direction = Vector3::new(0.0, 0.0, 1.0).normalize();
+            let diffuse = f32::max(ambient_light, normal.dot(&light_direction));
+            let sky_diffuse = f32::max(ambient_light, normal.dot(&sky_light_direction));
             let shadow_raycast = state.raycast_terrain(x as f32, y as f32, light_direction);
             let shadow = if shadow_raycast != 0.0 {
                 ambient_light

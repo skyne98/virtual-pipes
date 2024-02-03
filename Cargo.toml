@@ -10,7 +10,7 @@ noise = "0.8.2"
 notan = { version = "0.11.0" }
 palette = "0.7.4"
 rand = { version = "0.8.5" }
-ultraviolet = { version = "0.9.2" }
+nalgebra = "0.32.3"
 
 [profile.release]
 debug = true
