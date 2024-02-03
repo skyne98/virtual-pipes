@@ -10,9 +10,12 @@ use std::time::Instant;
 use noise::{NoiseFn, Perlin, Seedable};
 use notan::draw::*;
 use notan::prelude::*;
+use palette::blend::Blend;
 use palette::Mix;
 use palette::Srgb;
+use palette::Srgba;
 use ultraviolet::Vec2;
+use ultraviolet::Vec3;
 
 const WIDTH: usize = 128;
 const HEIGHT: usize = 128;
@@ -164,6 +167,48 @@ impl State {
             panic!("tilt_angle is NaN or infinite");
         }
         tilt_angle
+    }
+    fn get_normal(&self, index: usize) -> Vec3 {
+        if index >= WIDTH * HEIGHT {
+            return Vec3::zero();
+        }
+        let (x, y) = self.ix2(index);
+        let diff_left = if x == 0 {
+            0.0
+        } else {
+            self.sediment[index] - self.sediment[self.ix(x - 1, y)]
+        };
+        let diff_right = if x == WIDTH - 1 {
+            0.0
+        } else {
+            self.sediment[index] - self.sediment[self.ix(x + 1, y)]
+        };
+        let diff_bottom = if y == 0 {
+            0.0
+        } else {
+            self.sediment[index] - self.sediment[self.ix(x, y - 1)]
+        };
+        let diff_top = if y == HEIGHT - 1 {
+            0.0
+        } else {
+            self.sediment[index] - self.sediment[self.ix(x, y + 1)]
+        };
+
+        let normal_x = Vec3::new(1.0, 0.0, diff_left - diff_right);
+        let normal_y = Vec3::new(0.0, 1.0, diff_top - diff_bottom);
+        normal_x.cross(normal_y).normalized()
+    }
+    fn get_normal_color(&self, index: usize) -> Srgb {
+        let normal = self.get_normal(index);
+        /*
+         X: -1 to +1 :  Red:     0 to 255
+         Y: -1 to +1 :  Green:   0 to 255
+         Z:  0 to 1 :  Blue:  128 to 255
+        */
+        let r = ((normal.x + 1.0) * 0.5 * 255.0) as u8;
+        let g = ((normal.y + 1.0) * 0.5 * 255.0) as u8;
+        let b = ((normal.z * 128.0) + 128.0) as u8;
+        Srgb::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
     }
 
     fn step(&mut self) {
@@ -486,9 +531,10 @@ fn update(app: &mut App, state: &mut State) {
         let mouse_water = state.get_water(mouse_ix);
         let mouse_suspend_sediment = state.suspended_sediment[mouse_ix];
         let mouse_tilt = state.get_tilt(mouse_ix);
+        let mouse_normal = state.get_normal(mouse_ix);
         app.window().set_title(&format!(
-            "Virtual Pipes Demo - FPS: {:.2}; Sediment: {:.2}; Suspended: {:.2}; Sum: {:.2}; Water: {:.2}; [Sediment: {:.2}; Water: {:.2}; Suspended Sediment: {:.2}, Tilt: {:.2}]",
-            fps, sediment_sum, suspended_sediment_sum, sediment_and_suspend_sediment_sum, water_sum, mouse_sediment, mouse_water, mouse_suspend_sediment, mouse_tilt
+            "Virtual Pipes Demo - FPS: {:.2}; Sediment: {:.2}; Suspended: {:.2}; Sum: {:.2}; Water: {:.2}; [Sediment: {:.2}; Water: {:.2}; Suspended Sediment: {:.2}, Tilt: {:.2}, Normal: {:?}]",
+            fps, sediment_sum, suspended_sediment_sum, sediment_and_suspend_sediment_sum, water_sum, mouse_sediment, mouse_water, mouse_suspend_sediment, mouse_tilt, mouse_normal
         ));
     }
     // Input
@@ -541,6 +587,9 @@ fn update(app: &mut App, state: &mut State) {
 fn srgb_to_color(srgb: Srgb) -> Color {
     Color::new(srgb.red, srgb.green, srgb.blue, 1.0)
 }
+fn srgba_to_color(srgba: Srgba) -> Color {
+    Color::new(srgba.red, srgba.green, srgba.blue, srgba.alpha)
+}
 
 fn draw(gfx: &mut Graphics, state: &mut State) {
     let mut draw = gfx.create_draw();
@@ -553,15 +602,14 @@ fn draw(gfx: &mut Graphics, state: &mut State) {
             let suspended = state.suspended_sediment[i];
             let water = state.water[i];
 
-            let factor = 10.0;
-            let sediment_color = Srgb::new(sediment / factor, sediment / factor, 0.0).into_linear();
-            let suspended_color = Srgb::new(0.0, suspended / CAPACITY_K, 0.0).into_linear();
-            let water_color = Srgb::new(0.0, 0.0, 1.0).into_linear();
-            let color = sediment_color.mix(
-                water_color.mix(suspended_color, suspended / CAPACITY_K),
-                water / factor,
-            );
-            let color = srgb_to_color(color.into());
+            let sediment_color = Srgb::new(246u8, 215u8, 176u8);
+            let normal = state.get_normal(i);
+            let light_direction = Vec3::new(0.0, 0.0, 1.0);
+            let diffuse = f32::max(0.0, normal.dot(light_direction));
+            let color = sediment_color.into_format() * diffuse;
+            let water_color = Srgb::new(0.0, 0.0, 1.0);
+            let color = color.mix(water_color, water / 5.0);
+            let color = srgba_to_color(color.into());
             draw.rect(
                 (x as f32 * SCALE as f32, y as f32 * SCALE as f32),
                 (SCALE as f32, SCALE as f32),
