@@ -14,6 +14,7 @@ use palette::blend::Blend;
 use palette::Mix;
 use palette::Srgb;
 use palette::Srgba;
+use ultraviolet::Rotor3;
 use ultraviolet::Vec2;
 use ultraviolet::Vec3;
 
@@ -42,6 +43,7 @@ struct State {
     pipe_area: f32,
     pipe_length: f32,
     last_step: Instant,
+    light_direction: Vec3,
 }
 
 impl State {
@@ -57,7 +59,19 @@ impl State {
                 let ny = ny * 4.0;
                 let nz = 0.0;
                 let value = perlin.get([nx, ny, nz]);
+
+                // second, more detailed noise
+                let nx = x as f64 / WIDTH as f64 - 0.5;
+                let nx = nx * 8.0;
+                let ny = y as f64 / HEIGHT as f64 - 0.5;
+                let ny = ny * 8.0;
+                let nz = 10.0;
+                let value2 = perlin.get([nx, ny, nz]);
+                // scale it down
+                let value2 = value2 * 2.5;
+
                 sediment[i] = (value * 10.0 + 10.0).max(0.0).min(20.0) as f32;
+                sediment[i] += value2 as f32;
             }
         }
 
@@ -77,6 +91,7 @@ impl State {
             pipe_area: 1.0,
             pipe_length: 0.1,
             last_step: Instant::now(),
+            light_direction: Vec3::new(1.0, 1.0, 1.0).normalized(),
         }
     }
     fn ix(&self, x: usize, y: usize) -> usize {
@@ -195,7 +210,7 @@ impl State {
         };
 
         let normal_x = Vec3::new(1.0, 0.0, diff_left - diff_right);
-        let normal_y = Vec3::new(0.0, 1.0, diff_top - diff_bottom);
+        let normal_y = Vec3::new(0.0, 1.0, diff_bottom - diff_top);
         normal_x.cross(normal_y).normalized()
     }
     fn get_normal_color(&self, index: usize) -> Srgb {
@@ -209,6 +224,32 @@ impl State {
         let g = ((normal.y + 1.0) * 0.5 * 255.0) as u8;
         let b = ((normal.z * 128.0) + 128.0) as u8;
         Srgb::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
+    }
+    fn raycast_terrain(&self, x: f32, y: f32, direction: Vec3) -> f32 {
+        if direction.x == 0.0 && direction.y == 0.0 {
+            return 0.0;
+        }
+        let start_ix = self.ix(x as usize, y as usize);
+        let start_sediment = self.sediment[start_ix];
+        let mut t = start_sediment;
+        let mut current_x = x;
+        let mut current_y = y;
+        while current_x >= 0.0
+            && current_x < WIDTH as f32
+            && current_y >= 0.0
+            && current_y < HEIGHT as f32
+        {
+            let ix = self.ix(current_x as usize, current_y as usize);
+            let sediment = self.sediment[ix];
+            let height = sediment;
+            if height > t {
+                return t;
+            }
+            t += direction.z;
+            current_x += direction.x;
+            current_y += direction.y;
+        }
+        0.0
     }
 
     fn step(&mut self) {
@@ -602,11 +643,39 @@ fn draw(gfx: &mut Graphics, state: &mut State) {
             let suspended = state.suspended_sediment[i];
             let water = state.water[i];
 
-            let sediment_color = Srgb::new(246u8, 215u8, 176u8);
+            let ambient_light = 0.35;
+            let sand_color: Srgb<f32> = Srgb::new(246u8, 215u8, 176u8).into_format();
+            let grass_color: Srgb<f32> = Srgb::new(65u8, 152u8, 10u8).into_format();
+            let stone_color: Srgb<f32> = Srgb::new(97u8, 84u8, 65u8).into_format();
+            let grass_start = 10.0;
+            let stone_start = 15.0;
+            let terrain_max = 20.0;
+            // do linear interpolation
+            let sediment_color = if sediment < grass_start {
+                sand_color.mix(grass_color, sediment / grass_start)
+            } else if sediment < stone_start {
+                grass_color.mix(
+                    stone_color,
+                    (sediment - grass_start) / (stone_start - grass_start),
+                )
+            } else {
+                stone_color.mix(
+                    Srgb::new(1.0, 1.0, 1.0),
+                    (sediment - stone_start) / (terrain_max - stone_start),
+                )
+            };
             let normal = state.get_normal(i);
-            let light_direction = Vec3::new(0.0, 0.0, 1.0);
-            let diffuse = f32::max(0.0, normal.dot(light_direction));
-            let color = sediment_color.into_format() * diffuse;
+            let light_direction = state.light_direction.clone();
+            let sky_light_direction = Vec3::new(0.0, 0.0, 1.0).normalized();
+            let diffuse = f32::max(ambient_light, normal.dot(light_direction));
+            let sky_diffuse = f32::max(ambient_light, normal.dot(sky_light_direction));
+            let shadow_raycast = state.raycast_terrain(x as f32, y as f32, light_direction);
+            let shadow = if shadow_raycast != 0.0 {
+                ambient_light
+            } else {
+                1.0
+            };
+            let color = sediment_color.into_format() * f32::min(diffuse, shadow) * sky_diffuse;
             let water_color = Srgb::new(0.0, 0.0, 1.0);
             let color = color.mix(water_color, water / 5.0);
             let color = srgba_to_color(color.into());
